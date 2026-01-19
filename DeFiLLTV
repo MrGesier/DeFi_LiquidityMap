@@ -2,9 +2,9 @@ import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 
-# -----------------------------
+# =============================
 # Page config
-# -----------------------------
+# =============================
 st.set_page_config(page_title="Liquidation Feasibility in DeFi", layout="wide")
 
 st.title("Liquidation Feasibility in DeFi")
@@ -13,16 +13,21 @@ st.caption(
     "Δ = liquidity haircut + oracle/spot basis. LLTV → LIF. If effective loss > LIF ⇒ liquidators abstain ⇒ bad debt risk."
 )
 
-# -----------------------------
-# Sidebar controls (with tooltips everywhere)
-# -----------------------------
-st.sidebar.header("Inputs")
+# =============================
+# Sidebar layout
+# =============================
+st.sidebar.title("Controls")
 
 x_mode = st.sidebar.radio(
     "X-axis mode",
     ["% of executable depth", "$ (absolute)"],
-    help="Choose whether the x-axis is expressed as a percentage of executable depth or in absolute dollars."
+    help="Switch x-axis units. In $ mode, liquidation size is converted into β = size/depth."
 )
+
+# -----------------------------
+# Category: Market Depth
+# -----------------------------
+st.sidebar.subheader("Market Depth")
 
 market_depth_usd = st.sidebar.number_input(
     "Executable market depth ($)",
@@ -30,231 +35,277 @@ market_depth_usd = st.sidebar.number_input(
     max_value=10_000_000_000,
     value=150_000_000,
     step=10_000_000,
-    help="Depth that can realistically be hit near spot during liquidation (NOT TVL)."
+    help="Depth that can realistically be hit near spot during liquidation (NOT TVL). "
+         "Think: executable depth within a small price band / limited blocks."
 )
 
-# Liquidity haircut component (part of Δ)
+# -----------------------------
+# Category: Stress & Δ components
+# -----------------------------
+st.sidebar.subheader("Stress Components (Δ)")
+
 haircut_pct = st.sidebar.slider(
     "Liquidity haircut (%)",
     0, 95, 40,
-    help="How much depth disappears under stress due to LP withdrawal / orderbook thinning. "
+    help="Represents LP withdrawal / depth collapse under stress. "
          "A 40% haircut means only 60% of nominal depth remains executable."
 )
 
-# Oracle basis component (part of Δ)
 basis_pct = st.sidebar.slider(
     "Oracle ↔ spot basis (%)",
     0.0, 15.0, 2.0, step=0.5,
-    help="Execution penalty due to oracle lag / divergence. Liquidations trigger at oracle price but execute at spot."
+    help="Penalty due to oracle lag/divergence. Liquidations trigger at oracle price but execute at spot."
 )
 
-# Weights to build Δ from haircut and basis
+st.sidebar.markdown("**Δ weights**")
 w_haircut = st.sidebar.slider(
-    "Δ weight: haircut",
+    "Weight: haircut",
     0.0, 2.0, 1.0, step=0.05,
-    help="Weight applied to the normalized haircut component when building Δ."
-)
-w_basis = st.sidebar.slider(
-    "Δ weight: oracle basis",
-    0.0, 2.0, 1.0, step=0.05,
-    help="Weight applied to the normalized oracle-basis component when building Δ."
+    help="Weight applied to normalized haircut when constructing Δ."
 )
 
-# Risk config
+w_basis = st.sidebar.slider(
+    "Weight: basis",
+    0.0, 2.0, 1.0, step=0.05,
+    help="Weight applied to normalized oracle basis when constructing Δ."
+)
+
+# -----------------------------
+# Category: LLTV / LIF
+# -----------------------------
+st.sidebar.subheader("Risk Config (LLTV → LIF)")
+
 lltv = st.sidebar.slider(
     "LLTV (Liquidation Loan-To-Value)",
     0.50, 0.95, 0.86, step=0.01,
-    help="Liquidation threshold. When LTV exceeds LLTV, positions become liquidatable. "
-         "Higher LLTV increases leverage but reduces liquidation incentive margin."
+    help="Liquidation threshold. When LTV exceeds LLTV, the position becomes liquidatable. "
+         "Higher LLTV increases leverage but typically reduces liquidation margin."
 )
 
-# LIF model selector
 lif_model = st.sidebar.selectbox(
-    "LIF model (simplified)",
+    "LIF model",
     ["Proxy ( (1-LLTV)/LLTV )", "Fixed bands (5% / 10%)"],
-    help="This app focuses on the economic condition: effective execution loss must be ≤ liquidation incentive. "
-         "Exact formulas vary by protocol; pick a simple proxy or fixed thresholds."
+    help="We focus on the economic condition: effective execution loss must be ≤ liquidation incentive (LIF). "
+         "Exact protocol formulas vary; pick a simple proxy or fixed bands for illustration."
 )
 
-# Microstructure / convexity + stress amplification
-st.sidebar.header("Execution Model")
+# -----------------------------
+# Category: Microstructure (slippage shape)
+# -----------------------------
+st.sidebar.subheader("Microstructure (Execution Cost)")
+
 base_fee_pct = st.sidebar.slider(
     "Base execution cost (%)",
     0.0, 5.0, 1.0, step=0.1,
-    help="Baseline cost floor representing fees + routing friction even for small trades."
+    help="Baseline cost floor (fees + routing friction), even for small liquidations."
 )
 
 convexity = st.sidebar.slider(
     "Slippage convexity",
     0.05, 1.00, 0.25, step=0.01,
-    help="Controls how fast slippage explodes as liquidation size approaches executable depth."
+    help="Controls how fast slippage explodes as liquidation size approaches executable depth (β→1)."
 )
 
 stress_amp = st.sidebar.slider(
     "Stress amplification (non-linear)",
     0.00, 0.20, 0.06, step=0.01,
-    help="Controls how strongly Δ amplifies execution loss non-linearly (convex)."
+    help="Controls how strongly Δ amplifies execution costs non-linearly."
 )
 
-# Dislocation boundary parameters
-st.sidebar.header("Dislocation Boundary")
+# -----------------------------
+# Category: Dislocation boundary
+# -----------------------------
+st.sidebar.subheader("Dislocation Boundary")
+
 disloc_mid = st.sidebar.slider(
-    "Dislocation midpoint (β at which it starts)",
+    "Midpoint (β where dislocation starts)",
     0.30, 0.90, 0.60, step=0.01,
-    help="Where the dislocation boundary shifts from 'rare' to 'likely' as liquidation size grows."
-)
-disloc_steep = st.sidebar.slider(
-    "Dislocation steepness",
-    5, 50, 22, step=1,
-    help="How sharp the boundary transition is."
-)
-disloc_base = st.sidebar.slider(
-    "Dislocation base Δ",
-    0.5, 5.0, 1.8, step=0.1,
-    help="Base Δ threshold below which dislocation is unlikely for small β."
-)
-disloc_span = st.sidebar.slider(
-    "Dislocation span (additional Δ needed at high β)",
-    0.5, 6.0, 3.8, step=0.1,
-    help="How much higher Δ the system can tolerate before dislocating at large β."
+    help="Where the dislocation boundary transitions as β increases."
 )
 
-# -----------------------------
+disloc_steep = st.sidebar.slider(
+    "Steepness",
+    5, 50, 22, step=1,
+    help="How sharp the dislocation boundary transition is."
+)
+
+disloc_base = st.sidebar.slider(
+    "Base Δ",
+    0.5, 5.0, 1.8, step=0.1,
+    help="Baseline Δ threshold below which dislocation is unlikely for small β."
+)
+
+disloc_span = st.sidebar.slider(
+    "Additional Δ tolerance at high β",
+    0.5, 6.0, 3.8, step=0.1,
+    help="How much additional Δ can be tolerated before dislocation at large β."
+)
+
+# =============================
 # Helper functions
-# -----------------------------
+# =============================
 def lif_from_lltv(lltv_val: float) -> float:
-    # Simple proxy: higher LLTV => lower margin
+    # Simple proxy: higher LLTV -> lower margin.
     return max(0.0, (1.0 - lltv_val) / lltv_val)
 
 def effective_loss(beta: np.ndarray, delta: np.ndarray, base_fee: float, conv: float, amp: float) -> np.ndarray:
     """
-    Effective liquidation loss (fraction) = convex slippage(beta) amplified by stress(delta) + base fee
-    + NOTE: oracle basis already included inside delta definition (not added separately here).
+    Effective liquidation loss (fraction):
+    - convex slippage in beta
+    - amplified by stress delta
+    Note: oracle basis is included inside delta construction (conceptually).
     """
-    # convex slippage core
-    # grows quickly as beta -> 1
-    slip0 = (base_fee) + (conv * (beta**2) / (1.0 - beta))
-    # stress amplification (non-linear)
+    slip0 = base_fee + (conv * (beta**2) / (1.0 - beta))
     mult = 1.0 + amp * (delta**2)
     return slip0 * mult
 
 def dislocation_boundary(beta: np.ndarray, mid: float, steep: float, base: float, span: float) -> np.ndarray:
-    # logistic transition from base to base+span around mid
     return base + span * (1.0 / (1.0 + np.exp(-(beta - mid) * steep)))
 
-# -----------------------------
-# Build Δ from haircut & basis (for the current scenario)
-# Normalize haircut to [0,1] via /100, basis to [0,1] via /10
-# -----------------------------
-delta_current = w_haircut * (haircut_pct / 100.0) * 10.0 + w_basis * (basis_pct / 10.0)
-# Scale to ~0..10 range (roughly) by multiplying haircut term by 10 and using basis/10
-# This is intentionally a composite "stress index", not a physical unit.
+# =============================
+# Build Δ (y-axis)
+# =============================
+# Normalize haircut to [0..1] via /100, basis to [0..~1.5] via /10 (since basis slider 0..15)
+# Then map to a 0..10-ish stress index.
+delta_current = (w_haircut * (haircut_pct / 100.0) * 10.0) + (w_basis * (basis_pct / 10.0))
 
-# executable depth under haircut
+# Depth after haircut
 effective_depth_usd = market_depth_usd * (1.0 - haircut_pct / 100.0)
 
-# current x scenario
+# =============================
+# Current scenario (x-axis)
+# =============================
 if x_mode == "% of executable depth":
     liquidation_size_pct = st.sidebar.slider(
         "Current liquidation size (% of executable depth)",
         1, 100, 50,
-        help="Current scenario liquidation size expressed as a percent of executable depth after haircut."
+        help="Current scenario liquidation size as a percent of executable depth (after haircut)."
     )
     beta_current = liquidation_size_pct / 100.0
     liquidation_size_usd = effective_depth_usd * beta_current
+
 else:
+    # IMPORTANT: keep all number_input args the same type (int) to avoid StreamlitMixedNumericTypesError
+    max_liq = int(max(100_000, np.floor(effective_depth_usd)))  # int
+    default_liq = int(min(50_000_000, max(200_000, max_liq * 0.5)))  # int
+    step_liq = int(max(100_000, min(5_000_000, max_liq // 20)))  # int
+
     liquidation_size_usd = st.sidebar.number_input(
         "Current liquidation size ($)",
-        min_value=100_000,
-        max_value=float(max(1_000_000, int(effective_depth_usd))),
-        value=int(min(50_000_000, max(200_000, effective_depth_usd * 0.5))),
-        step=1_000_000,
-        help="Current scenario liquidation size in USD. It will be converted into β = size/depth."
+        min_value=int(100_000),
+        max_value=int(max_liq),
+        value=int(default_liq),
+        step=int(step_liq),
+        help="Current scenario liquidation size in USD. Converted internally to β = size/depth."
     )
     beta_current = float(np.clip(liquidation_size_usd / max(1.0, effective_depth_usd), 0.01, 0.99))
     liquidation_size_pct = int(round(beta_current * 100))
 
-# LIF for current
+# =============================
+# LIF setup
+# =============================
 lif_proxy = lif_from_lltv(lltv)
 lif_5 = 0.05
 lif_10 = 0.10
 
-# choose which LIF we plot as the main red threshold
 if lif_model == "Proxy ( (1-LLTV)/LLTV )":
+    lif_lines = [(lif_proxy, f"LIF from LLTV ({lif_proxy*100:.1f}%)")]
     lif_main = lif_proxy
-    lif_label = f"LIF proxy from LLTV ({lif_main*100:.1f}%)"
 else:
-    # show both 5% and 10% explicitly; use 10% as main line for "more generous"
-    lif_main = lif_10
-    lif_label = "LIF threshold (10%)"
+    lif_lines = [(lif_5, "LIF 5%"), (lif_10, "LIF 10%")]
+    lif_main = lif_10  # use 10% as "more generous" main reference
 
-# -----------------------------
-# Grid for plotting
-# -----------------------------
-beta_grid = np.linspace(0.01, 0.99, 260)
-delta_grid = np.linspace(0.0, 10.0, 260)
+# =============================
+# Build grid
+# =============================
+beta_grid = np.linspace(0.01, 0.99, 280)
+delta_grid = np.linspace(0.0, 10.0, 280)
 B, D = np.meshgrid(beta_grid, delta_grid)
 
 loss_grid = effective_loss(B, D, base_fee_pct / 100.0, convexity, stress_amp)
+disloc_grid = dislocation_boundary(B, disloc_mid, disloc_steep, disloc_base, disloc_span)
 
-# Zones:
-# - Dislocation zone if D >= dislocation boundary
-disloc = dislocation_boundary(B, disloc_mid, disloc_steep, disloc_base, disloc_span)
-is_disloc = D >= disloc
-
-# - "LLTV too high → LIF too low" zone: effective loss > LIF_main (economic no-liquidation)
+is_disloc = D >= disloc_grid
 unsafe_econ = loss_grid > lif_main
 
-# Build zone codes for filled plot:
-# 0 = safe (loss <= LIF and not dislocated)
-# 1 = marginal band (loss between 5% and 10%) if fixed model, else near LIF (optional)
-# 2 = econ-unsafe (loss > LIF) not dislocated
-# 3 = dislocation
+# zone codes:
+# 0 safe
+# 1 marginal (only if fixed bands)
+# 2 econ-unsafe (LLTV too high → LIF too low)
+# 3 dislocation
 zone = np.zeros_like(loss_grid, dtype=int)
 zone[(unsafe_econ) & (~is_disloc)] = 2
 zone[is_disloc] = 3
 
-# If using fixed bands, add marginal band between 5% and 10% for extra readability
 if lif_model == "Fixed bands (5% / 10%)":
     zone[(loss_grid > lif_5) & (loss_grid <= lif_10) & (~is_disloc)] = 1
     zone[(loss_grid <= lif_5) & (~is_disloc)] = 0
 
-# -----------------------------
-# Plot with Plotly
-# -----------------------------
+zone_label = {
+    0: "SAFE (liquidators act)",
+    1: "MARGINAL (sensitive to incentives)",
+    2: "LLTV too high → LIF too low (liquidators abstain)",
+    3: "DISLOCATION (liquidity collapse / execution failure)",
+}
+
+# x axis values for plotting
+if x_mode == "$ (absolute)":
+    x_grid = beta_grid * effective_depth_usd
+    x_current = float(liquidation_size_usd)
+    x_title = "Liquidation size / executable depth ($)"
+else:
+    x_grid = beta_grid * 100.0
+    x_current = float(beta_current * 100.0)
+    x_title = "Liquidation size / executable depth (%)"
+
+# =============================
+# Plotly Figure
+# =============================
 fig = go.Figure()
 
-# Background zones (colors via colorscale)
-# Use a discrete colorscale-like mapping through z values; Plotly uses continuous, but this works visually.
+# Discrete colorscale for zones (explicit => heatmap always visible)
+# 0 safe, 1 marginal, 2 econ-unsafe, 3 dislocation
+colorscale = [
+    [0.00, "#C8F7C5"], [0.2499, "#C8F7C5"],  # safe
+    [0.25, "#FFF3B0"], [0.4999, "#FFF3B0"],  # marginal
+    [0.50, "#FFD1D1"], [0.7499, "#FFD1D1"],  # econ-unsafe
+    [0.75, "#D6E4FF"], [1.00, "#D6E4FF"],    # dislocation
+]
+
+# Heatmap (zones)
 fig.add_trace(
     go.Heatmap(
-        x=beta_grid * (effective_depth_usd if x_mode == "$ (absolute)" else 100.0),
+        x=x_grid,
         y=delta_grid,
         z=zone,
         zmin=0,
         zmax=3,
-        showscale=False,
+        colorscale=colorscale,
+        opacity=0.55,
+        colorbar=dict(
+            title="Zone",
+            tickmode="array",
+            tickvals=[0, 1, 2, 3],
+            ticktext=[
+                "Safe",
+                "Marginal",
+                "LLTV too high → LIF too low",
+                "Dislocation",
+            ],
+        ),
         hovertemplate=(
             ("Liquidation size: $%{x:,.0f}<br>" if x_mode == "$ (absolute)" else "Liquidation size: %{x:.1f}%<br>")
             + "Δ: %{y:.2f}<br>"
             + "Zone: %{z}<extra></extra>"
         ),
-        opacity=0.35,
     )
 )
 
-# LIF contour(s) in red
-if lif_model == "Proxy ( (1-LLTV)/LLTV )":
-    levels = [lif_main]
-    labels = [lif_label]
-else:
-    levels = [lif_5, lif_10]
-    labels = ["LIF 5%", "LIF 10%"]
-
-for lvl, lbl in zip(levels, labels):
+# LIF contour lines (red)
+for lvl, lbl in lif_lines:
     fig.add_trace(
         go.Contour(
-            x=beta_grid * (effective_depth_usd if x_mode == "$ (absolute)" else 100.0),
+            x=x_grid,
             y=delta_grid,
             z=loss_grid,
             contours=dict(start=lvl, end=lvl, size=1e-6, coloring="none"),
@@ -265,10 +316,10 @@ for lvl, lbl in zip(levels, labels):
         )
     )
 
-# Dislocation boundary in black
+# Dislocation boundary line (black)
 fig.add_trace(
     go.Scatter(
-        x=beta_grid * (effective_depth_usd if x_mode == "$ (absolute)" else 100.0),
+        x=x_grid,
         y=dislocation_boundary(beta_grid, disloc_mid, disloc_steep, disloc_base, disloc_span),
         mode="lines",
         line=dict(color="black", width=3),
@@ -281,89 +332,89 @@ fig.add_trace(
 )
 
 # Current scenario point
-x_current = liquidation_size_usd if x_mode == "$ (absolute)" else (beta_current * 100.0)
-loss_current = float(effective_loss(np.array([beta_current]), np.array([delta_current]),
-                                    base_fee_pct / 100.0, convexity, stress_amp)[0])
+loss_current = float(
+    effective_loss(
+        np.array([beta_current]),
+        np.array([delta_current]),
+        base_fee_pct / 100.0,
+        convexity,
+        stress_amp
+    )[0]
+)
 
 fig.add_trace(
     go.Scatter(
         x=[x_current],
         y=[delta_current],
         mode="markers",
-        marker=dict(size=14, symbol="x"),
+        marker=dict(size=14, symbol="x", color="black"),
         name="Current scenario",
         hovertemplate=(
             (f"Liquidation size: ${liquidation_size_usd:,.0f}<br>" if x_mode == "$ (absolute)" else f"Liquidation size: {beta_current*100:.1f}%<br>")
             + f"Δ: {delta_current:.2f}<br>"
             + f"Effective loss: {loss_current*100:.1f}%<br>"
-            + (f"LIF (from LLTV): {lif_main*100:.1f}%<extra></extra>" if lif_model.startswith("Proxy") else f"LIF band: {('5%/10%')}<extra></extra>")
+            + (f"LIF: {lif_proxy*100:.1f}% (from LLTV)<extra></extra>"
+               if lif_model.startswith("Proxy") else "LIF: 5% / 10% bands<extra></extra>")
         ),
     )
 )
 
-# Layout
-x_title = "Liquidation size / executable depth ($)" if x_mode == "$ (absolute)" else "Liquidation size / depth (%)"
 fig.update_layout(
-    height=680,
-    margin=dict(l=20, r=20, t=60, b=20),
-    title="Liquidation Feasibility Map (Execution Loss vs Incentives & Dislocation)",
+    height=720,
+    title="Liquidation Feasibility Map (zones, incentives & dislocation)",
     xaxis_title=x_title,
     yaxis_title="Δ = liquidity haircut + oracle/spot basis (stress index)",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    margin=dict(l=20, r=20, t=60, b=20),
 )
 
-# Zone labels (annotations)
-fig.add_annotation(x=0.02, y=0.98, xref="paper", yref="paper",
-                   text="<b>Zones:</b> Safe / Marginal / LLTV too high → LIF too low / Dislocation",
-                   showarrow=False, align="left")
+# Extra annotations (zone meaning)
+fig.add_annotation(
+    x=0.01, y=0.99, xref="paper", yref="paper",
+    text=(
+        "<b>Key rule:</b> if <b>effective loss</b> crosses the <b>red LIF line</b>, "
+        "liquidation becomes irrational → liquidators abstain → bad debt risk."
+    ),
+    showarrow=False,
+    align="left",
+)
 
 st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------
+# =============================
 # Current Scenario (below the graph)
-# -----------------------------
+# =============================
 st.subheader("Current Scenario (below the graph)")
 
 c1, c2, c3, c4 = st.columns(4)
-
-c1.metric("Executable depth ($)", f"${effective_depth_usd:,.0f}")
+c1.metric("Executable depth after haircut ($)", f"${effective_depth_usd:,.0f}")
 c2.metric("Liquidation size ($)", f"${liquidation_size_usd:,.0f}")
 c3.metric("Δ (stress index)", f"{delta_current:.2f}")
 if lif_model.startswith("Proxy"):
-    c4.metric("LIF (from LLTV)", f"{lif_main*100:.1f}%")
+    c4.metric("LIF (from LLTV)", f"{lif_proxy*100:.1f}%")
 else:
     c4.metric("LIF reference", "5% / 10%")
 
 st.markdown("---")
 
-left, right = st.columns([1, 1])
+# Verdict logic
+disloc_current = float(
+    dislocation_boundary(np.array([beta_current]), disloc_mid, disloc_steep, disloc_base, disloc_span)[0]
+)
 
-with left:
-    st.markdown("### Execution economics")
-    st.write(f"- **Effective liquidation loss** (slippage+stress): **{loss_current*100:.1f}%**")
-    if lif_model.startswith("Proxy"):
-        st.write(f"- **Liquidation incentive (LIF)** from LLTV: **{lif_main*100:.1f}%**")
-    else:
-        st.write(f"- **Liquidation incentive reference bands:** 5% / 10%")
+if delta_current >= disloc_current:
+    st.error("🛑 **Dislocation regime**: liquidity collapse likely (pool drained / execution failure).")
+elif loss_current > lif_main:
+    st.error("⚠️ **LLTV too high → LIF too low**: effective loss exceeds incentive → liquidation may not happen → bad debt risk.")
+else:
+    st.success("✅ **Economically feasible**: incentive exceeds effective stressed execution loss.")
+
+with st.expander("How to interpret"):
     st.write(
-        "- Rule: if **effective loss > LIF**, liquidation is economically irrational → liquidators abstain → bad debt risk."
-    )
-
-with right:
-    st.markdown("### Risk verdict")
-    disloc_current = float(dislocation_boundary(np.array([beta_current]), disloc_mid, disloc_steep, disloc_base, disloc_span)[0])
-    if delta_current >= disloc_current:
-        st.error("🛑 **Dislocation regime**: liquidity collapse likely (pool drained / execution failure).")
-    elif loss_current > lif_main:
-        st.error("⚠️ **LLTV too high → LIF too low**: effective loss exceeds incentive → liquidation may not happen → bad debt risk.")
-    else:
-        st.success("✅ **Economically feasible**: incentive exceeds effective stressed execution loss.")
-
-st.markdown("---")
-with st.expander("Notes (what this is / is not)"):
-    st.write(
-        "This is an execution-feasibility visualization. Δ is a composite stress index "
-        "built from liquidity haircut and oracle/spot basis (with adjustable weights). "
-        "The slippage function is intentionally convex to reflect real-world depth decay. "
-        "You can tune convexity and stress amplification to fit your intuition or data."
+        "• **Green**: liquidation profitable → liquidators act.\n"
+        "• **Yellow**: marginal → depends on incentives & assumptions.\n"
+        "• **Pink**: **LLTV too high → LIF too low** → liquidators abstain → bad debt risk.\n"
+        "• **Blue**: dislocation → liquidity collapse / execution failure.\n\n"
+        "Δ is a composite stress index built from liquidity haircut and oracle/spot basis (weights adjustable). "
+        "The execution loss model is intentionally convex to reflect real-world depth decay."
     )
